@@ -275,7 +275,7 @@ colnames(merge70)[14:34]=c("GSM4706348_T47D_GPL17692_S",	"GSM4706349_T47D_GPL176
 
 ```
 
-### Nomalizacion de matrices
+### Normalizacion de matrices
 
 El siguiente paso en nuestro análisis es la normalización de las matrices de expresión génica. Es importante tener en cuenta que nuestras matrices provienen de diferentes chips de microarrays, y cada uno puede tener ya su propio método de normalización aplicado. Por lo tanto, antes de aplicar un proceso de normalización adicional, es fundamental verificar si los datos ya fueron normalizados por los autores. Una forma sencilla de determinar si los datos ya han sido procesados es revisar el nombre del archivo descargado desde la base de datos. Si el archivo incluye el término "RAW", es probable que los datos aún no hayan sido normalizados y que necesiten un ajuste previo a cualquier análisis. En cambio, si el archivo no tiene "RAW" en su nombre, podría indicar que ya se han aplicado técnicas de normalización, lo que nos permitiría omitir este paso. Otra forma es realizar un grafico de boxplot para corroborar la distribucion de los valores de expresion.
 
