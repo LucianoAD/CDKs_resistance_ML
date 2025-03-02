@@ -3,6 +3,7 @@ title: "Fusionando muestras de distintos estudios de microarrays"
 author: "Luciano_Anselmino"
 output:
   html_document:
+    output_file: "index.html"
     theme: lumen  # Otros: cosmo, flatly, journal, readable, spacelab, united
     toc: true  # Activa el índice de navegación
     toc_float: true  # Hace que el índice se mantenga visible al hacer scroll
@@ -39,10 +40,10 @@ library(ggrepel)
 ```
 
 ```{r, echo=FALSE}
-load("microarreglos_2.RData")
+load(".RData")
 ```
 
-## Resumen del flijo de trabajo
+## Resumen del flujo de trabajo
 
 1️⃣ Normalizar las matrices de expresión y estabilizar la varianza convirtiéndolas a log2.
 
@@ -248,10 +249,14 @@ Para facilitar la identificación de las muestras al fusionar los conjuntos de d
 CódigoDeMuestra_LineaCelular_Plataforma_Condición
 
 Donde:
+
 CódigoDeMuestra: Corresponde al identificador único de la muestra (por ejemplo, GSM2629622).
+
 LineaCelular: Indica la línea celular utilizada en el experimento (por ejemplo, MCF7 o T47D).
+
 Plataforma: Especifica la plataforma de microarray empleada (por ejemplo, GPL10558).
 Condición: Describe la condición experimental, que puede ser sensible (S) o resistente (R).
+
 Para hacer esto puedes armar una funcion (si tus tablas de metadatos tienen toda la informacion que neceistas con nombes de columna similares) o bien copiar los colnames de las matirces una por una y armar los nombres en excel en buscando los datos  que necesitas y luego reemplazarlos, en este caso dado las diferencias en lso nombres de columna en los metadatos de cada serie, decidi armas los nombres manualmente, ahor alos reemplazare en cada serie: 
 
 ```{r, eval=FALSE}
@@ -306,7 +311,7 @@ ggplot(data_long, aes(x = variable, y = value)) +
 
 ```
 ```{r,echo=FALSE, out.width="70%"}
-knitr::include_graphics(".images/boxplots/merge02_not_normalized.png")
+knitr::include_graphics("./images/boxplots/merge02_not_normalized.png")
 ```
 
 El boxplot muestra que los datos tienen una distribución extremadamente sesgada, con una gran cantidad de valores atípicos (outliers) en la parte superior. Esto sugiere que los valores de expresión tienen una escala muy amplia en valores crudos. No estan nomalizados.
