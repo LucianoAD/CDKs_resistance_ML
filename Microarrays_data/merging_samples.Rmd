@@ -771,7 +771,7 @@ Después de aplicar Combat, observamos que logró reducir en gran medida la sepa
 
 Vamos a realizar un ANOVA para determinar si siguen existinedo diferencias significativas entre las plataformas:
 
-```{r,eval=FALSE}
+```{r}
 
 expresion_long <- matriz_combat %>%
   as.data.frame() %>%

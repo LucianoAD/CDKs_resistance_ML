@@ -2279,9 +2279,24 @@ diferencias significativas entre las plataformas:</p>
   left_join(metadata_combinada, by = &quot;ID_muestra&quot;)
 
 anova_result &lt;- aov(Expresion ~ ID_PL, data = expresion_long)
-summary(anova_result)
-
-TukeyHSD(anova_result)</code></pre>
+summary(anova_result)</code></pre>
+<pre><code>##                 Df  Sum Sq Mean Sq F value Pr(&gt;F)
+## ID_PL            3       0   0.157   0.042  0.989
+## Residuals   519444 1960013   3.773</code></pre>
+<pre class="r"><code>TukeyHSD(anova_result)</code></pre>
+<pre><code>##   Tukey multiple comparisons of means
+##     95% family-wise confidence level
+## 
+## Fit: aov(formula = Expresion ~ ID_PL, data = expresion_long)
+## 
+## $ID_PL
+##              diff         lwr        upr     p adj
+## 2-1  0.0022844816 -0.02619394 0.03076290 0.9969060
+## 3-1  0.0030132137 -0.01889550 0.02492193 0.9848775
+## 4-1  0.0021314615 -0.01951288 0.02377581 0.9943217
+## 3-2  0.0007287321 -0.02368134 0.02513881 0.9998383
+## 4-2 -0.0001530201 -0.02432610 0.02402006 0.9999985
+## 4-3 -0.0008817521 -0.01679744 0.01503393 0.9989723</code></pre>
 <p>Vemos que combat logro eliminar el efecto de la plataforma, vamos a
 hacer un boxplot para asegurarnos de que la distribucion de los valores
 de expresion dentro de cada muestra entre las plataformas es
