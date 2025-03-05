@@ -27,6 +27,7 @@ library(AnnotationDbi)
 library(reshape2)
 library(preprocessCore)
 library(limma)
+library(sva)
 
 #Librerias para anotacion de sondas
 library(illuminaHumanv4.db)
@@ -559,45 +560,44 @@ Vemos que la densidad de los valores de expresion mejoro bastante, podriamos usa
 
 ### Union de las matrices
 
-Ya tenemos nuestras matrices anotadas, normalizadas y, si es necesario, filtradas. Además, todas han sido transformadas a log2. Ahora, comencemos encontrando los genes comunes en todas las matrices, para eso necesitamos comparar los nombres de los genes que anotamos, vamos a crear en cada matriz una columna llamda "gene_symbol"
+Ya tenemos nuestras matrices anotadas, normalizadas y, si es necesario, filtradas. Además, todas han sido transformadas a log2. Ahora, comencemos encontrando los genes comunes en todas las matrices, para eso necesitamos comparar los nombres de los genes que anotamos, vamos a crear en cada matriz una columna llamda "gene_symbol" y luego la vamos a extraer y guardar en un objeto que nos ervira para crear una lista de nombres de genes para cada amtriz y luego compararlas entre si. 
 
 ```{r, eval=FALSE}
 # Listar las matrices y asignarles un nombre a cada una
 matrices <- list(
-  merge02_normlog = merge02_normlog,  # La matriz de datos normalizada y log-transformada
-  merge42_numeric = merge42_numeric,  # Otra matriz de datos numéricos
-  merge70_numeric = merge70_numeric,  # Otra matriz numérica
-  merge87_filtered = merge87_filtered  # Matriz filtrada
+  merge02_normlog = merge02_normlog,
+  merge42_numeric = merge42_numeric,
+  merge70_numeric = merge70_numeric,  
+  merge87_filtered = merge87_filtered  
 )
 
 # Creé una función que agrega una columna llamada gene_symbol a cada matriz, extrayendo los nombres de los genes como una lista. Luego, asigna un nombre único a cada lista, con un número al final que indica de qué matriz proviene
 
-crear_listas <- function(matrices) {
-  nombres_matrices <- names(matrices)  # Obtener los nombres de las matrices en la lista
+extraer_genes <- function(matrices) {
+  nombres_matrices <- names(matrices)  # Obtener los nombres de las matrices en la lista de nombres
   
   for (i in seq_along(matrices)) {  # Recorrer cada matriz en la lista
-    # Extraer los números del nombre de la matriz
-    sufijo <- gsub("\\D", "", nombres_matrices[i])  # Elimina todos los caracteres no numéricos del nombre
+    sufijo <- gsub("\\D", "", nombres_matrices[i])  # Elimina todos los caracteres no numéricos del nombre de la amtriz
     
     # Crear un data frame con los nombres de los genes (filas) de la matriz
     df <- data.frame(gene_symbol = rownames(matrices[[i]]), stringsAsFactors = FALSE)
     
-    # Asignar el nombre correcto de la columna (en caso de que no se haya asignado previamente)
+    # Asignar el nombre  "gene_symbol" a la nueva columna con los row.names
     colnames(df) <- "gene_symbol"
     
-    # Asignar el objeto con el nombre adecuado en el entorno global
-    assign(paste0("lista", sufijo), df, envir = .GlobalEnv)  # Crear una lista para cada sufijo numérico (lista02, lista42, etc.)
+    # Crear un df con el nombre genes+ ultimos dos digitos del nombre de la serie en el entorno global
+    assign(paste0("genes", sufijo), df, envir = .GlobalEnv)  #(genes02, genes42, etc.)
   }
 }
 
-# Ejecutar la función para crear las listas
-crear_listas(matrices)
+# Ejecutar la función para extraer los genes de cada matriz
+extraer_genes(matrices)
 
-# Crear una lista con los nombres de los genes de todas las matrices generadas
-listas_de_genes <- list(lista02$gene_symbol, lista42$gene_symbol, lista70$gene_symbol, lista87$gene_symbol)
+# Crear una lista de listas con los nombres de los genes de todas las matrices generadas
+listas_de_genes <- list(genes02$gene_symbol, genes42$gene_symbol, genes70$gene_symbol, genes87$gene_symbol)
 
 # Obtener los nombres de genes comunes a todas las listas utilizando la función 'Reduce' y 'intersect'
-genes_comunes <- Reduce(intersect, listas_de_genes)  # Encuentra los genes comunes entre todas las listas
+genes_comunes <- Reduce(intersect, listas_de_genes) 
 
 # Filtrar cada matriz para que solo contenga los genes comunes
 merge02_comunes <- merge02_normlog[rownames(merge02_normlog) %in% genes_comunes, ]
@@ -664,6 +664,7 @@ table(condicion)  # Para ver el número de muestras en cada categoría
 #Transformar a un vector numerico
 condicion <- ifelse(condicion == "Sensible", 1, 2)
 ```
+
 Armamos la matriz de metadatos basica ( se le puede agregar mas informacion de ser necesario): 
 
 ```{r, eval=FALSE}
@@ -671,10 +672,11 @@ nombres_muestras<-colnames(matriz_combinada)
 
 metadata_combinada<-data.frame(ID_muestra = nombres_muestras, condicion = condicion, ID_PL=plataformas)
 metadata_combinada$condicion<-as.factor(metadata_combinada$condicion)
+metadata_combinada$ID_PL<-as.factor(metadata_combinada$ID_PL)
 
 ```
 
-Antes de iniciar la correccion de los efectos de fondo vamos a hacer un PCA explotaro en el que esperamos observar cluster de muestras correspondientes a cada platafroma (este es el efecto que queremos eliminar).
+Antes de iniciar la correccion de los efectos de fondo vamos a hacer un PCA explotario en el que esperamos observar cluster de muestras correspondientes a cada plataforma (este es el efecto que queremos eliminar).
 ```{r}
 # Transponer la matriz para que las muestras sean filas y los genes columnas
 matriz_t <- t(matriz_combinada)
@@ -707,21 +709,22 @@ ggplot(pca_df, aes(x = PC1, y = PC2, color = Plataforma, shape = Condicion)) +
 
 ```
 
-Para eliminar los efectos de lote en nuestros datos, aplicaremos tres métodos distintos: Combat, limma y SVA. Cada uno está diseñado para manejar diferentes tipos de variabilidad en los datos de expresión génica.
+Para eliminar los efectos de lote en nuestros datos, aplicaremos primero dos métodos distintos en principio por separado: Combat y SVA. Cada uno está diseñado para manejar diferentes tipos de variabilidad en los datos de expresión génica. A veces, si uno de ellos no es suficiente pare reducir totalmente los efectos de lote puede combinarse. Generalmente cuando se combinan, primero se aplica Combat para remover efectos conocidos y luego SVA para elminar cualquier variacion residual no controlada. 
+
+Para saber si aplicar solo un metodo es suficiente, se debe realizar un ANOVA entre las plataformas, si las diferencias entre las mismas fueron resueltas, el ANOVA arrojara un resultado no significativo (un valor de p-value menor a 0.05). Tambien es combeniente realizar una prueba de contrastes multiples despues del ANOVA para detectar cuales son los pares de plataforrmas problematicos.
+
+Aqui hay mas informacion sobre para que sirve cada metodo: 
 
 1️⃣ Combat
 El método Combat es ideal cuando se asume que los únicos efectos no biológicos que afectan los datos son conocidos y bien definidos. En este caso, suponemos que la única fuente de variabilidad técnica proviene de las diferencias entre plataformas, sin que otros factores como el protocolo de extracción de ARN, la dosis de tratamiento, la línea celular utilizada o cualquier otra variable desconocida influyan en los datos. Combat ajusta la expresión génica corrigiendo estos efectos de lote de manera paramétrica o no paramétrica, asegurando que las muestras de diferentes plataformas sean comparables.
 
-2️⃣ Corrección de lote con limma
-El paquete limma ofrece una corrección de batch effect mediante la función removeBatchEffect(). A diferencia de Combat, que modela explícitamente el efecto de lote, limma ajusta la expresión génica utilizando modelos lineales para eliminar la variabilidad técnica sin alterar la señal biológica de interés. Este método es útil cuando ya se han identificado los efectos de lote pero se desea una corrección más flexible, que se pueda integrar en análisis de expresión diferencial.
 
-3️⃣ SVA (Surrogate Variable Analysis)
+2️⃣ SVA (Surrogate Variable Analysis)
 Cuando se sospecha que hay otras fuentes de variabilidad desconocidas ademas de la que ya has identificado, SVA es el método más adecuado. Este algoritmo detecta y estima variables sustitutas (SVs) que capturan la variabilidad oculta en los datos, permitiendo eliminar efectos no deseados sin necesidad de conocerlos previamente. Esto es útil cuando, además del efecto de la plataforma, supones que pueden existir otros factores sistemáticos desconocidos que afectan la expresión génica.
 
 **1)Empecemos por combat:**
 
 ```{r, eval=FALSE}
-library(sva)
 
 # Crear vector de plataforma (batch), asegurándote de que coincide con el orden de las muestras
 batch <- rep(c("GPL20844", "GPL571", "GPL17692", "GPL10558"), 
@@ -731,6 +734,8 @@ batch <- rep(c("GPL20844", "GPL571", "GPL17692", "GPL10558"),
 matriz_combat <- ComBat(dat = as.matrix(matriz_combinada), batch = batch, mod = NULL, par.prior = TRUE, prior.plots = FALSE)
 
 ```
+
+
 ```{r}
 # Transponer la matriz para que las muestras sean filas y los genes columnas
 matriz_t <- t(matriz_combat)
@@ -764,230 +769,72 @@ ggplot(pca_df, aes(x = PC1, y = PC2, color = Plataforma, shape = Condicion)) +
 
 Después de aplicar Combat, observamos que logró reducir en gran medida la separación entre los grupos previamente influenciados por el efecto de lote. Sin embargo, aún se mantiene cierto grado de agrupamiento entre las muestras, lo que sugiere que podrían existir otras fuentes de variabilidad subyacentes que no fueron completamente corregidas.
 
-**2)Intentemos con Limma:**
+Vamos a realizar un ANOVA para determinar si siguen existinedo diferencias significativas entre las plataformas:
 
-```{r, eval=FALSE}
-matriz_limma <- removeBatchEffect(as.matrix(matriz_combinada), batch = batch)
+```{r,eval=FALSE}
 
+expresion_long <- matriz_combat %>%
+  as.data.frame() %>%
+  rownames_to_column("Gen") %>%
+  pivot_longer(-Gen, names_to = "ID_muestra", values_to = "Expresion") %>%
+  left_join(metadata_combinada, by = "ID_muestra")
+
+anova_result <- aov(Expresion ~ ID_PL, data = expresion_long)
+summary(anova_result)
+
+TukeyHSD(anova_result)
 ```
+Vemos que combat logro eliminar el efecto de la plataforma, vamos a hacer un boxplot para asegurarnos de que la distribucion de los valores de expresion dentro de cada  muestra entre las plataformas es similar.
 
 ```{r}
-# Transponer la matriz para que las muestras sean filas y los genes columnas
-matriz_t <- t(matriz_limma)
+# Convertir la matriz a formato largo
+matriz_combat_long <- melt(as.data.frame(matriz_combat), variable.name = "ID_muestra")
 
-# Calcular PCA
-pca <- prcomp(matriz_t, scale. = TRUE)
+# Unir con la metadata para agregar la información de la plataforma
+matriz_combat_long <- left_join(matriz_combat_long, metadata_combinada, by = "ID_muestra")
 
-# Crear un dataframe con las coordenadas del PCA
-pca_df <- as.data.frame(pca$x)
+# Convertir la plataforma en factor para que sea categórica
+matriz_combat_long$ID_PL <- as.factor(matriz_combat_long$ID_PL)
+# Reemplazar los números de ID_PL con los nombres de las plataformas
+matriz_combat_long$ID_PL <- factor(matriz_combat_long$ID_PL,
+                                levels = c(1, 2, 3, 4),
+                                labels = c("GPL20844", "GPL571", "GPL17692", "GPL10558"))
 
-# Agregar las etiquetas de plataforma y condición
-pca_df$Plataforma <- rep(c("GPL20844", "GPL571", "GPL17692", "GPL10558"), 
-                         times = c(8, 6, 21, 23))  # Ajustar según el número de muestras por plataforma
-
-pca_df$Condicion <- ifelse(grepl("R$", colnames(matriz_combinada)), "Resistente", "Sensible")
-
-# Asignar formas y colores
-formas <- c("Sensible" = 17, "Resistente" = 16)  # Triángulo para sensible (17), círculo para resistente (16)
-colores <- c("GPL20844" = "red", "GPL571" = "blue", "GPL17692" = "green", "GPL10558" = "purple")
-
-# Graficar PCA
-ggplot(pca_df, aes(x = PC1, y = PC2, color = Plataforma, shape = Condicion)) +
-  geom_point(size = 1.5) +
-  scale_color_manual(values = colores) +
-  scale_shape_manual(values = formas) +
-  labs(title = "PCA despues de aplicar limma",
-       x = "PC1",
-       y = "PC2") +
-  theme_minimal()
+# Crear el boxplot con colores por plataforma
+ggplot(matriz_combat_long, aes(x = ID_muestra, y = value, fill = ID_PL)) +
+  geom_boxplot(alpha = 0.6, outlier.size = 0.8) +
+  theme_minimal() +
+  labs(title = "Distribución de la expresión después de aplicar Combat por plataforma",
+       x = "Muestras",
+       y = "Nivel de Expresión",
+       fill = "Plataforma") +
+  theme(
+    axis.text.x = element_text(size = 6, angle = 90, hjust = 1, vjust = 0.5),
+    axis.ticks.x = element_blank(),
+    legend.position = "top",
+    plot.title = element_text(size = 10, hjust = 0.5), 
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8)
+  ) +
+  scale_fill_brewer(palette = "Set1")
 ```
 
-En comparación, Combat logró reducir en mayor medida los efectos de lote. Aunque se observa una clara disminución en la formación de clústeres, algunas muestras de la misma plataforma siguen agrupadas estrechamente. Esto sugiere nuevamente la presencia de fuentes de variabilidad no controladas.
+Observamos que los datos son comparables entre si por lo que ya podemos utilizar esta matriz para analisis posteriores.
 
-**3)Apliquemos ahora SVA:**
 
-```{r, eval=FALSE}
-# Definir modelo con SOLO la condición biológica
-mod <- model.matrix(~ condicion, data = metadata_combinada)  # Mantiene la condición biológica
-mod0 <- model.matrix(~ 1, data = metadata_combinada)  # Modelo nulo con solo el intercepto
 
-# Determinar el número de variables sustitutas
-n.sv <- num.sv(matriz_combinada, mod, method = "leek")
 
-# Aplicar SVA
-sva_obj <- sva(matriz_combinada, mod, mod0, n.sv = n.sv)
 
-# Agregar las variables sustitutas al modelo
-mod_sva <- cbind(mod, sva_obj$sv)
 
-# Ajustar modelo lineal con las variables de SVA
-fit <- lmFit(matriz_combinada, mod_sva)
 
-# Eliminar efecto de batch usando las SVs detectadas
-matriz_sva <- removeBatchEffect(matriz_combinada, covariates = sva_obj$sv, design = mod)
 
-```
-```{r}
-# Transponer la matriz para que las muestras sean filas y los genes columnas
-matriz_t <- t(matriz_sva)
 
-# Calcular PCA
-pca <- prcomp(matriz_t, scale. = TRUE)
 
-# Crear un dataframe con las coordenadas del PCA
-pca_df <- as.data.frame(pca$x)
 
-# Agregar las etiquetas de plataforma y condición
-pca_df$Plataforma <- rep(c("GPL20844", "GPL571", "GPL17692", "GPL10558"), 
-                         times = c(8, 6, 21, 23))  # Ajustar según el número de muestras por plataforma
 
-pca_df$Condicion <- ifelse(grepl("R$", colnames(matriz_combinada)), "Resistente", "Sensible")
 
-pca_df$ID_muestra <- substr(rownames(pca_df), 1, 10)
 
-# Asignar formas y colores
-formas <- c("Sensible" = 17, "Resistente" = 16)  # Triángulo para sensible (17), círculo para resistente (16)
-colores <- c("GPL20844" = "red", "GPL571" = "blue", "GPL17692" = "green", "GPL10558" = "purple")
 
-# Graficar PCA
-# 
-ggplot(pca_df, aes(x = PC1, y = PC2, color = Plataforma, shape = Condicion)) +
-  geom_point(size = 1.5) +
-  ggrepel::geom_text_repel(aes(label = ID_muestra), size = 3) +  
-  scale_color_manual(values = colores) +
-  scale_shape_manual(values = formas) +
-  labs(title = "PCA después de aplicar SVA",
-       x = "PC1",
-       y = "PC2") +
-  theme_minimal()
-```
 
-En este gráfico de PCA, agregué el nombre de las muestras para identificar mejor aquellas que presentan un comportamiento atípico. Si bien se observa una reducción significativa de los efectos de lote, algunas muestras individuales muestran una gran desviación con respecto al resto. Esto sugiere que podrían tener problemas técnicos o estar introduciendo un alto nivel de ruido en los datos.
-En general, la integración de los datos es adecuada, salvo por dos muestras de la plataforma Agilent (GPL20844, en rojo), que siguen mostrando una alta variabilidad no corregida. Dado que su ruido de fondo no pudo ser eliminado, procederemos a remover estas muestras y repetir el análisis.
-Remuevo las muestras (GSM7147296 y GSM7147297)tanto de mi matriz de expresion como de los metadatos:
-```{r, eval=FALSE}
-matriz_combinada_filtrada<-matriz_combinada[,-c(1,2)]
-metadata_combinada_filtrada<-metadata_combinada[-c(1,2),]
-```
-Repito el analisis:
-```{r, eval=FALSE}
-# Definir modelo con SOLO la condición biológica
-mod <- model.matrix(~ condicion, data = metadata_combinada_filtrada)  # Mantiene la condición biológica
-mod0 <- model.matrix(~ 1, data = metadata_combinada_filtrada)  # Modelo nulo con solo el intercepto
 
-# Determinar el número de variables sustitutas
-n.sv <- num.sv(matriz_combinada_filtrada, mod, method = "leek")
 
-# Aplicar SVA
-sva_obj <- sva(matriz_combinada_filtrada, mod, mod0, n.sv = n.sv)
-
-# Agregar las variables sustitutas al modelo
-mod_sva <- cbind(mod, sva_obj$sv)
-
-# Ajustar modelo lineal con las variables de SVA
-fit <- lmFit(matriz_combinada_filtrada, mod_sva)
-
-# Eliminar efecto de batch usando las SVs detectadas
-matriz_sva_filtrada <- removeBatchEffect(matriz_combinada_filtrada, covariates = sva_obj$sv, design = mod)
-```
-```{r}
-# Transponer la matriz para que las muestras sean filas y los genes columnas
-matriz_t <- t(matriz_sva_filtrada)
-
-# Calcular PCA
-pca <- prcomp(matriz_t, scale. = TRUE)
-
-# Crear un dataframe con las coordenadas del PCA
-pca_df <- as.data.frame(pca$x)
-
-# Agregar las etiquetas de plataforma y condición
-pca_df$Plataforma <- rep(c("GPL20844", "GPL571", "GPL17692", "GPL10558"), 
-                         times = c(6, 6, 21, 23))  # Ajustar según el número de muestras por plataforma
-
-pca_df$Condicion <- ifelse(grepl("R$", colnames(matriz_combinada_filtrada)), "Resistente", "Sensible")
-
-pca_df$ID_muestra <- substr(rownames(pca_df), 1, 10)
-
-# Asignar formas y colores
-formas <- c("Sensible" = 17, "Resistente" = 16)  # Triángulo para sensible (17), círculo para resistente (16)
-colores <- c("GPL20844" = "red", "GPL571" = "blue", "GPL17692" = "green", "GPL10558" = "purple")
-
-# Graficar PCA
-ggplot(pca_df, aes(x = PC1, y = PC2, color = Plataforma, shape = Condicion)) +
-  geom_point(size = 1.5) +
-  scale_color_manual(values = colores) +
-  scale_shape_manual(values = formas) +
-  labs(title = "PCA despues de aplicar SVA",
-       x = "PC1",
-       y = "PC2") +
-  theme_minimal()
-```
-
-Observando la escala del gráfico, podemos notar que la variabilidad entre las plataformas se redujo aproximadamente a la mitad tras la eliminación de las dos muestras problemáticas. Además, las muestras ya no muestran un agrupamiento exclusivo por color (plataforma), lo que indica una mejor integración de los datos.
-
-Sin embargo, las muestras de la plataforma Agilent parecen ser más difíciles de integrar con los datos de Affymetrix, a diferencia de las de Illumina, que muestran una mejor adaptación. Dado esto, exploraremos qué sucede si eliminamos por completo la plataforma Agilent y repetimos el análisis.
-
-Preparamos las matrices removiendo todas las muestras de la plataforma GPL20844:
-
-```{r}
-matriz_combinada_3p<-matriz_combinada[,-c(1:8)]
-metadata_combinada_3p<-metadata_combinada[-c(1:8),]
-dim(matriz_combinada_3p)
-dim(metadata_combinada_3p)
-```
-
-```{r, eval=FALSE}
-# Definir modelo con SOLO la condición biológica
-mod <- model.matrix(~ condicion, data = metadata_combinada_3p)  # Mantiene la condición biológica
-mod0 <- model.matrix(~ 1, data = metadata_combinada_3p)  # Modelo nulo con solo el intercepto
-
-# Determinar el número de variables sustitutas
-n.sv <- num.sv(matriz_combinada_3p, mod, method = "leek")
-
-# Aplicar SVA
-sva_obj <- sva(matriz_combinada_3p, mod, mod0, n.sv = n.sv)
-
-# Agregar las variables sustitutas al modelo
-mod_sva <- cbind(mod, sva_obj$sv)
-
-# Ajustar modelo lineal con las variables de SVA
-fit <- lmFit(matriz_combinada_3p, mod_sva)
-
-# Eliminar efecto de batch usando las SVs detectadas
-matriz_sva_3p <- removeBatchEffect(matriz_combinada_3p, covariates = sva_obj$sv, design = mod)
-```
-```{r}
-# Transponer la matriz para que las muestras sean filas y los genes columnas
-matriz_t <- t(matriz_sva_3p)
-
-# Calcular PCA
-pca <- prcomp(matriz_t, scale. = TRUE)
-
-# Crear un dataframe con las coordenadas del PCA
-pca_df <- as.data.frame(pca$x)
-
-# Agregar las etiquetas de plataforma y condición
-pca_df$Plataforma <- rep(c( "GPL571", "GPL17692", "GPL10558"), 
-                         times = c(6, 21, 23))  # Ajustar según el número de muestras por plataforma
-
-pca_df$Condicion <- ifelse(grepl("R$", colnames(matriz_combinada_3p)), "Resistente", "Sensible")
-
-pca_df$ID_muestra <- substr(rownames(pca_df), 1, 10)
-
-# Asignar formas y colores
-formas <- c("Sensible" = 17, "Resistente" = 16)  # Triángulo para sensible (17), círculo para resistente (16)
-colores <- c("GPL571" = "blue", "GPL17692" = "green", "GPL10558" = "purple")
-
-# Graficar PCA
-ggplot(pca_df, aes(x = PC1, y = PC2, color = Plataforma, shape = Condicion)) +
-  geom_point(size = 1.5) +
-  scale_color_manual(values = colores) +
-  scale_shape_manual(values = formas) +
-  labs(title = "PCA despues de aplicar SVA (tres plataformas)",
-       x = "PC1",
-       y = "PC2") +
-  theme_minimal()
-```
-
-Aunque este también es un buen resultado, observamos que, en comparación con el PCA anterior, la variabilidad no se reduce tanto al eliminar completamente la plataforma Agilent. Además, parece surgir nuevamente un cierto grado de agrupamiento entre algunas muestras de la misma plataforma.
-Por esta razón, en principio utilizaremos la matriz corregida en el análisis previo para aplicar los métodos de aprendizaje automático.
