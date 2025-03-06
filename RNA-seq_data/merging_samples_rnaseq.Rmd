@@ -1,0 +1,529 @@
+---
+title: "Fusionando muestras de distintos estudios de RNA-seq"
+author: "Luciano_Anselmino"
+output:
+  html_document:
+    output_file: "index.html"
+    theme: lumen  # Otros: cosmo, flatly, journal, readable, spacelab, united
+    toc: true  # Activa el índice de navegación
+    toc_float: true  # Hace que el índice se mantenga visible al hacer scroll
+    number_sections: true  # Numera las secciones
+---
+
+```{r librerias, message=FALSE, warning=FALSE}
+
+#Librerias de manipulacion y analisis de datos
+library(dplyr)
+library(tidyverse)
+library(reshape2)
+library(edgeR)
+library(sva)
+
+#Librerias para anotacion de sondas
+library(biomaRt)
+
+#Librerias para graficos
+library(ggplot2)
+library(ggrepel)
+```
+
+
+```{r, echo=FALSE}
+load(".RData")
+```
+
+## Resumen del flujo de trabajo
+
+1️⃣ Anotar las sondas.
+
+2️⃣ Normalizar las matrices de expresión y estabilizar la varianza convirtiéndolas a log2.
+
+3️⃣ Filtrar las sondas con baja expresion en la mayoria de las muestras
+
+4️⃣ Retener las sondas comunes a todas las matrices y fusionarlas.
+
+4️⃣ Corregir los efectos de lote (batch effects) con Combat o SVA.
+
+
+## Sumarizacion y anotacion de muestras de matrices de expresion
+
+**Serie GSE128056**
+En esta serie, cada valor de cuenta ya tiene asignado un nombre de gen. Sin embargo, algunos genes aparecen repetidos en múltiples filas. Para resolver esto, resumiremos la matriz calculando el promedio de expresión para cada gen, de modo que cada nombre de gen aparezca solo una vez. Además, la matriz de expresión contiene columnas no numéricas, las cuales descartaremos para evitar posibles inconvenientes en los análisis posteriores.
+
+```{r eval=FALSE}
+
+# Conectar a Ensembl
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+# Lista de IDs Ensembl
+ensembl_ids <- as.vector(GSE128056_exp$Row.names)
+
+# Obtener los símbolos de los genes
+annot <- getBM(attributes = c("ensembl_gene_id", "hgnc_symbol"),
+               filters = "ensembl_gene_id",
+               values = ensembl_ids,
+               mart = mart)
+annot<-na.omit(annot)
+
+annot <- annot %>% filter(hgnc_symbol != "")
+
+colnames(GSE128056_exp)[1]="ensembl_gene_id"
+
+merge56<-merge(annot,GSE128056_exp, by="ensembl_gene_id")
+merge56<-merge56[,2:9]
+
+merge56 <- merge56 %>%
+  group_by(hgnc_symbol) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE))
+
+row.names(merge56)=merge56$hgnc_symbol
+
+
+colnames(merge56)[2:8]=c("GSM3660965 _T47D_GPL11154_S",	"GSM3660966 _T47D_GPL11154_S",	"GSM3660967 _T47D_GPL11154_S",	"GSM3660968 _T47D_GPL11154_R",	"GSM3660969 _T47D_GPL11154_R",	"GSM3660970_T47D_GPL11154_R",	"GSM3660971_T47D_GPL11154_R"
+)
+
+```
+
+**Series GSE130437, GSE143944, GSE222367, GSE270021 y GSE229235**
+
+Dada la similitud en la estructura de estas matrices de expresión, crearemos una función para evitar la repetición innecesaria de código. Esta función recibe como parámetros: la matriz de expresión convertida en data.frame, el tipo de base de datos requerida para la anotación (que puede ser 'ensembl' o 'entrez') y el nombre de la matriz en el entorno de trabajo.
+
+El proceso comienza extrayendo los dos últimos números del nombre de la matriz para asignarlos al objeto final, permitiendo identificar su origen. Luego, se extrae la primera columna, que contiene los identificadores de los genes, y se procede a su anotación utilizando la base de datos especificada. Se filtran las secuencias que no poseen un símbolo de gen oficial, es decir, aquellas en las que la información del símbolo de gen está vacía. Posteriormente, se elimina la columna con los identificadores originales y se calcula el promedio de expresión para las secuencias que comparten el mismo símbolo de gen. Finalmente, el símbolo de gen se asigna como nombre de fila en la matriz resultante
+
+```{r, eval=FALSE}
+# Funcion annotate_expression_matrix:
+
+annotate_expression_matrix <- function(matrix, id_type = "entrez", matrix_name) {
+  # Extraer los últimos dos números del nombre de la matriz
+  name_suffix <- gsub(".*(\\d{2})_exp$", "\\1", matrix_name)
+
+  # Definir los atributos según el tipo de anotación
+  if (id_type == "entrez") {
+    id_column <- "entrezgene_id"
+    attributes <- c("entrezgene_id", "hgnc_symbol")
+    filter_type <- "entrezgene_id"
+  } else if (id_type == "ensembl") {
+    id_column <- "ensembl_gene_id"
+    attributes <- c("ensembl_gene_id", "hgnc_symbol")
+    filter_type <- "ensembl_gene_id"
+  } else {
+    stop("Tipo de ID no válido. Usa 'entrez' o 'ensembl'.")
+  }
+
+  # Extraer los IDs de la matriz
+  gene_ids <- as.vector(matrix[,1])  
+
+  # Obtener anotaciones
+  annot <- getBM(attributes = attributes,
+                 filters = filter_type,
+                 values = gene_ids,
+                 mart = mart)
+  
+  # Filtrar genes sin símbolo
+  annot <- annot %>% filter(hgnc_symbol != "")
+
+  # Renombrar la primera columna de la matriz para que coincida con la anotación
+  colnames(matrix)[1] <- id_column
+
+  # Merge con la matriz de expresión
+  merged_matrix <- merge(annot, matrix, by = id_column)
+  
+  # Eliminar la columna del ID original
+  merged_matrix <- merged_matrix[, -1]
+
+  # Promediar duplicados por símbolo de gen
+  merged_matrix <- merged_matrix %>%
+    group_by(hgnc_symbol) %>%
+    summarise(across(where(is.numeric), mean, na.rm = TRUE))
+
+  # Asignar nombres de fila
+  row.names(merged_matrix) <- merged_matrix$hgnc_symbol
+
+  # Crear el nombre dinámico del objeto (ejemplo: "merge35")
+  merge_name <- paste0("merge", name_suffix)
+
+  # Asignar el objeto con el nombre dinámico en el entorno global
+  assign(merge_name, merged_matrix, envir = .GlobalEnv)
+
+  return(merged_matrix)
+}
+
+# Aplicamos la funcion
+annotate_expression_matrix(GSE130437_exp, id_type = "entrez", matrix_name = "GSE130437_exp")
+annotate_expression_matrix(GSE143944_exp, id_type = "entrez", matrix_name = "GSE143944_exp")
+annotate_expression_matrix(GSE222367_exp, id_type = "entrez", matrix_name = "GSE222367_exp")
+annotate_expression_matrix(GSE270021_exp, id_type = "ensembl", matrix_name = "GSE270021_exp")
+
+# Para el caso particular de la matriz que decargamos de la serie GSE229235_exp, esta ya tiene una columna de anotacion de sondas, sin embargo, si las ordenamos por orden alfabetico vemos que hay errores en la anotacion. Aparecen nombres de genes como: 9-Mar, 7-Sep. Esto generalmente pasa cuando la informacion es leida o subida como .xls (excel). Vamos a eliminar esta columna y realizaremos la anotacion utilizando nuestra funcion. 
+
+GSE229235_exp<-GSE229235_exp[,-2]
+
+GSE229235_exp$GeneID <- sub("\\..*", "", GSE229235_exp$GeneID)
+
+annotate_expression_matrix(GSE229235_exp, id_type = "ensembl", matrix_name = "GSE229235_exp")
+```
+
+## Renombrado de muestras
+Vamos a cambiarle el nombre a las muestras para que sean mas infromativas, el formato sera: 
+
+CódigoGEODeMuestra_LineaCelular_Plataforma_Condición
+
+Esto se puede hacer en el entorno de trabajo o bien armarse en un medio externo como un editor de texto. En este caso fueron construidos en un programa externo.
+
+```{r, eval=FALSE}
+
+colnames(merge37)[2:13]=c("GSM3738651 _MCF7_GPL18573_R",	"GSM3738652 _MCF7_GPL18573_R",	"GSM3738653 _MCF7_GPL18573_R",	"GSM3738654 _MCF7_GPL18573_S",	"GSM3738655 _MCF7_GPL18573_S",	"GSM3738656_MCF7_GPL18573_S",	"GSM3738657 _MDAMB231_GPL18573_R",	"GSM3738658 _MDAMB231_GPL18573_R",	"GSM3738659 _MDAMB231_GPL18573_R",	"GSM3738660 _MDAMB231_GPL18573_S",	"GSM3738661 _MDAMB231_GPL18573_S",	"GSM3738662_MDAMB231_GPL18573_S")
+
+colnames(merge44)[2:13]=c("GSM4277127  _CAMA-1_GPL24676_S",	"GSM4277128  _CAMA-1_GPL24676_S",	"GSM4277129  _CAMA-1_GPL24676_S",	"GSM4277130  _CAMA-1_GPL24676_S",	"GSM4277131 _CAMA-1_GPL24676_S",	"GSM4277132  _CAMA-1_GPL24676_S",	"GSM4277133  _CAMA-1_GPL24676_R",	"GSM4277134  _CAMA-1_GPL24676_R",	"GSM4277135  _CAMA-1_GPL24676_R",	"GSM4277136  _CAMA-1_GPL24676_R",	"GSM4277137 _CAMA-1_GPL24676_R",	"GSM4277138 _CAMA-1_GPL24676_R")
+
+colnames(merge67)[2:21]=c("GSM6921637  _MCF7_GPL16791_S",	"GSM6921638  _MCF7_GPL16791_S",	"GSM6921639  _MCF7_GPL16791_S",	"GSM6921646  _MCF7_GPL16791_R",	"GSM6921647 _MCF7_GPL16791_R",	"GSM6921648  _MCF7_GPL16791_R",	"GSM6921650  _MCF7_GPL16791_R",	"GSM6921651  _MCF7_GPL16791_R",	"GSM6921652  _MCF7_GPL16791_S",	"GSM6921653  _MCF7_GPL16791_S",	"GSM6921654 _MCF7_GPL16791_S",	"GSM6921661  _MCF7_GPL16791_R",	"GSM6921662  _MCF7_GPL16791_R",	"GSM6921663  _MCF7_GPL16791_R",	"GSM6921664  _T47D_GPL16791_S",	"GSM6921665  _T47D_GPL16791_S",	"GSM6921666 _T47D_GPL16791_S",	"GSM6921676  _T47D_GPL16791_R",	"GSM6921677  _T47D_GPL16791_R",	"GSM6921678 _T47D_GPL16791_R"
+)
+
+colnames(merge21)[2:7]=c("GSM8332909 _T47D_GPL24676_S",	"GSM8332910 _T47D_GPL24676_S",	"GSM8332911 _T47D_GPL24676_S",	"GSM8332915 _T47D_GPL24676_R",	"GSM8332916 _T47D_GPL24676_R",	"GSM8332917_T47D_GPL24676_R")
+
+colnames(merge35)[2:38]=c("GSM7157384 _PD_GPL16791_S",	"GSM7157385 _PD_GPL16791_S",	"GSM7157386 _PD_GPL16791_S",	"GSM7157387 _PD_GPL16791_S",	"GSM7157388 _PD_GPL16791_S",	"GSM7157389_PD_GPL16791_S",	"GSM7157390 _PD_GPL16791_S",	"GSM7157391 _PD_GPL16791_S",	"GSM7157392 _PD_GPL16791_S",	"GSM7157393 _PD_GPL16791_S",	"GSM7157394 _PD_GPL16791_S",	"GSM7157395_PD_GPL16791_S",	"GSM7157396 _PD_GPL16791_S",	"GSM7157397 _PD_GPL16791_R",	"GSM7157398 _PD_GPL16791_R",	"GSM7157399 _PD_GPL16791_R",	"GSM7157400 _PD_GPL16791_R",	"GSM7157401_PD_GPL16791_R",	"GSM7157402 _PD_GPL16791_R",	"GSM7157403 _PD_GPL16791_R",	"GSM7157404 _PD_GPL16791_R",	"GSM7157405 _PD_GPL16791_R",	"GSM7157406 _PD_GPL16791_R",	"GSM7157407_PD_GPL16791_R",	"GSM7157408 _PD_GPL16791_R",	"GSM7157409 _PD_GPL16791_R",	"GSM7157410 _PD_GPL16791_R",	"GSM7157411 _PD_GPL16791_R",	"GSM7157412 _PD_GPL16791_R",	"GSM7157413_PD_GPL16791_R",	"GSM7157414 _PD_GPL16791_R",	"GSM7157415 _PD_GPL16791_R",	"GSM7157416 _PD_GPL16791_R",	"GSM7157417 _PD_GPL16791_R",	"GSM7157418 _PD_GPL16791_R",	"GSM7157419_PD_GPL16791_R",	"GSM7157420_PD_GPL16791_R")
+
+```
+
+
+## Normalizacion de matrices
+
+En este análisis, estamos trabajando con cuentas crudas, por lo que normalizaremos todas las matrices de expresión de forma independiente utilizando el mismo método. En este caso, aplicaremos la normalización TMM del paquete edgeR. Para automatizar el proceso, construiremos una función que realice la normalización.
+
+Además de la normalización, se implementara un filtrado de genes basado en los siguientes criterios:
+
+CPM > 1: Eliminamos genes con muy baja expresión.
+
+Presente en al menos el 50% de las muestras: Evita incluir genes expresados en un número muy reducido de muestras.
+
+Filtrado antes de la normalización: Siguiendo las recomendaciones de edgeR, aplicamos el filtrado antes de ejecutar calcNormFactors().
+
+Esta estrategia garantizará que trabajemos con genes relevantes y que la normalización se realice sobre datos de calidad.
+
+```{r, eval=FALSE}
+# Lista con los nombres de las matrices a normalizar
+matrices <- list(merge21, merge35, merge37, merge44, merge56, merge67)
+nombres <- c("merge21", "merge35", "merge37", "merge44", "merge56", "merge67")
+
+# Función para filtrar genes de baja expresión y normalizar
+normalizar_matriz <- function(matriz, nombre) {
+  # Guardar los nombres de los genes
+  gene_names <- matriz$hgnc_symbol
+  
+  # Extraer solo los valores de expresión (sin la columna de genes)
+  counts <- as.matrix(matriz[, -1])  # Convertir a matriz por seguridad
+  
+  # Crear objeto DGEList
+  dge <- DGEList(counts=counts)
+  
+  # Calcular CPM sin log
+  cpm_values <- cpm(dge, log=FALSE)
+  
+  # Filtrar genes con CPM > 1 en al menos el 50% de las muestras
+  keep <- rowSums(cpm_values > 1) >= (ncol(counts) / 2)
+  dge <- dge[keep, , keep.lib.sizes=FALSE]
+  
+  # Normalizar con TMM
+  dge <- calcNormFactors(dge, method = "TMM")
+  normalized_counts <- cpm(dge, log=TRUE, prior.count=1)
+  
+  # Restaurar los nombres de fila con los nombres de los genes filtrados
+  rownames(normalized_counts) <- gene_names[keep]
+  
+  # Asignar nombre dinámico a la variable en el entorno global
+  assign(paste0("merge", sub("merge", "", nombre), "_normalized"), 
+         normalized_counts, envir = .GlobalEnv)
+}
+
+# Aplicar la función a cada matriz
+mapply(normalizar_matriz, matrices, nombres)
+```
+
+## Fusion de matrices
+Fusionaremos únicamente las matrices que provienen de líneas celulares. La matriz del estudio GSE229235, que proviene de tumores derivados de pacientes, será fusionada más adelante con otra matriz del mismo tipo de datos.
+
+Las matrices que se combinarán en este paso son: GSE128056, GSE222367, GSE130437, GSE143944 y GSE270021.
+
+Antes de proceder con la fusión, aplicaremos un segundo filtro para conservar únicamente los genes presentes en todos los estudios. Para ello, seguiremos estos pasos:
+
+Extraer los nombres de fila (rownames) de cada matriz y almacenarlos en una lista.
+Comparar las listas para identificar los genes comunes a todos los estudios.
+Filtrar cada matriz para conservar únicamente los genes en común.
+
+Este procedimiento garantizará que la fusión de las matrices sea coherente y comparable entre estudios.
+
+```{r, eval=FALSE}
+
+# Listar las matrices y asignarles un nombre a cada una
+matrices <- list(
+  merge21_normalized = merge21_normalized,
+  merge37_normalized = merge37_normalized,  
+  merge44_normalized = merge44_normalized,  
+  merge56_normalized = merge56_normalized,
+  merge67_normalized = merge67_normalized
+)
+
+# La funcion "extraer_genes"  agrega una columna llamada gene_symbol a cada matriz y extrae esta información en un dataframe independiente. A partir de este dataframe, se generarán listas de nombres de genes correspondientes a cada matriz. Cada lista se nombrará de forma única, incluyendo un número al final que indica la matriz de origen. E
+
+extraer_genes <- function(matrices) {
+  nombres_matrices <- names(matrices)  # Obtener los nombres de las matrices en la lista
+  
+  for (i in seq_along(matrices)) {  # Recorrer cada matriz en la lista
+    # Extraer los números del nombre de la matriz
+    sufijo <- gsub("\\D", "", nombres_matrices[i])  # Elimina todos los caracteres no numéricos del nombre
+    
+    # Crear un data frame con los nombres de los genes (filas) de la matriz
+    df <- data.frame(gene_symbol = rownames(matrices[[i]]), stringsAsFactors = FALSE)
+    
+    # Asignar el nombre correcto de la columna (en caso de que no se haya asignado previamente)
+    colnames(df) <- "gene_symbol"
+    
+    # Asignar el objeto con el nombre adecuado en el entorno global
+    assign(paste0("genes", sufijo), df, envir = .GlobalEnv)  # Crear una lista para cada sufijo numérico (lista02, lista42, etc.)
+  }
+}
+
+# Ejecutar la función para crear las l
+crear_listas(matrices)
+
+# Crear una lista de listas de los nombres de los genes de cada matriz (5 listas en total)
+listas_de_genes <- list(genes21$gene_symbol, genes37$gene_symbol, genes44$gene_symbol, genes56$gene_symbol, genes67$gene_symbol)
+
+# Obtener los nombres de genes comunes a todas las listas utilizando la función 'Reduce' y 'intersect'
+genes_comunes <- Reduce(intersect, listas_de_genes)  # Encuentra los genes comunes entre todas las listas
+
+```
+
+Ahora vamos a crear una funcion que filtra los genes comunes en cada matriz y crea una martiz filtrada para cad auna en nuestro entorno de trabajo que seran las que fusionaremos mas tarde:
+
+```{r, eval=FALSE}
+
+filtrar_genes_comunes <- function(matriz, nombre) {
+  # Filtrar solo los genes en la lista genes_comunes
+  matriz_filtrada <- matriz[rownames(matriz) %in% genes_comunes, ]
+  
+  # Crear el nuevo nombre reemplazando "normalized" por "comunes"
+  nuevo_nombre <- sub("_normalized", "_comunes", nombre)
+  
+  # Asignar la matriz filtrada al nuevo nombre
+  assign(nuevo_nombre, matriz_filtrada, envir = .GlobalEnv)
+}
+
+# Lista de nombres de las matrices normalizadas
+nombres_matrices <- c("merge21_normalized", "merge37_normalized", 
+                       "merge44_normalized", "merge56_normalized", "merge67_normalized")
+
+# Aplicar la función a cada matriz
+lapply(nombres_matrices, function(nombre) {
+  filtrar_genes_comunes(get(nombre), nombre)
+})
+
+```
+
+Ahora que todas nuestras matrices filtradas tienen el mismo numero de filas, resta hacer dos cosas antes de remover los efectos de fondo, la primera es fusionarlas en una matriz comun y la segunda es crear una tabla de metadatos para esta matriz. 
+
+Comencemos con la fusion para saber cual sera el orden final de las muestras:
+
+```{r, eval=FALSE}
+
+# Primero vamos a crear una funcion que ordene todas laa filas de cad amatriz en el mismo orden
+
+reordenar_filas <- function(lista_matrices, referencia) {
+  # Obtener el orden de los genes desde la matriz de referencia
+  genes_ordenados <- rownames(lista_matrices[[referencia]])
+  
+  # Reordenar todas las matrices según los genes de referencia
+  for (nombre in names(lista_matrices)) {
+    lista_matrices[[nombre]] <- lista_matrices[[nombre]][genes_ordenados, , drop = FALSE]
+    assign(nombre, lista_matrices[[nombre]], envir = .GlobalEnv)  # Sobrescribe en el entorno global
+  }
+}
+
+# Listamos las matrices que debemos ordenar incluyendo la que usaremos como referencia
+
+lista_matrices <- mget(c("merge21_comunes", "merge37_comunes", "merge44_comunes", "merge56_comunes", "merge67_comunes"))
+
+# Aplicamos la funcion anterior pazando la matriz de referencia
+reordenar_filas(lista_matrices, "merge21_comunes")
+
+# Ahora vamos a hacer la fusion unioendo los datos por columna
+
+matriz_combinada <- cbind(merge21_comunes, merge37_comunes, merge44_comunes, merge56_comunes, merge67_comunes )
+
+```
+
+```{r}
+dim(matriz_combinada)
+```
+
+```{r}
+summary(as.vector(matriz_combinada))  
+hist(as.vector(matriz_combinada), breaks = 50, main = "Distribución de la expresión")
+```
+
+
+Comencemos ahora creando los metadatos basicos, estos deben contener la plataforma y la condicion sensible y resisitente para cada muestra:
+
+```{r}
+dim(merge21_comunes)
+dim(merge37_comunes)
+dim(merge44_comunes)
+dim(merge56_comunes)
+dim(merge67_comunes)
+```
+```{r, eval=FALSE}
+
+plataformas <- c(rep(1, 6), rep(2, 12), rep(3, 12), rep(4, 7), rep(5, 20) )
+
+
+# Extraer los nombres de las columnas de la matriz combinada
+muestras <- colnames(matriz_combinada)
+
+# Crear un vector de condición basado en la última letra del nombre de cada muestra
+condicion <- ifelse(grepl("R$", muestras), "Resistente", "Sensible")
+
+# Verificar el resultado
+table(condicion)  # Para ver el número de muestras en cada categoría
+
+#Transformar a un vector numerico
+condicion <- ifelse(condicion == "Sensible", 1, 2)
+```
+Armamos la matriz de metadatos basica ( se le puede agregar mas informacion de ser necesario, por ejemplo el CDKs utilizado). Es importante que las variables esten seteadas como facotres, sino el algoritmo de sva puede fallar mas adelante.
+
+```{r, eval=FALSE}
+nombres_muestras<-colnames(matriz_combinada)
+
+metadata_combinada<-data.frame(ID_muestra = nombres_muestras, condicion = condicion, ID_PL=plataformas)
+metadata_combinada$condicion<-as.factor(metadata_combinada$condicion)
+```
+
+Antes de iniciar la correccion de los efectos de fondo vamos a hacer un PCA explotario en el que esperamos observar cluster de muestras correspondientes a cada plataforma (este es el efecto que queremos eliminar).
+
+```{r}
+
+# Transponer la matriz para que las muestras sean filas y los genes columnas
+matriz_t <- t(matriz_combinada)
+
+# Calcular PCA
+pca <- prcomp(matriz_t, scale. = TRUE)
+
+# Crear un dataframe con las coordenadas del PCA
+pca_df <- as.data.frame(pca$x)
+
+# Agregar las etiquetas de plataforma y condición
+pca_df$Plataforma <- rep(c("GPL24676_1", "GPL18573", "GPL24676_2", "GPL11154", "GPL16791"), 
+                         times = c(6, 12, 12, 7,20))  # Ajustar según el número de muestras por plataforma
+
+pca_df$Condicion <- ifelse(grepl("R$", colnames(matriz_combinada)), "Resistente", "Sensible")
+
+# Asignar formas y colores
+formas <- c("Sensible" = 17, "Resistente" = 16)  # Triángulo para sensible (17), círculo para resistente (16)
+colores <- c("GPL24676_1" = "red", "GPL18573" = "blue", "GPL24676_2" = "green", "GPL11154" = "purple", "GPL16791"="orange" )
+
+# Graficar PCA
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Plataforma, shape = Condicion)) +
+  geom_point(size = 1.5) +
+  scale_color_manual(values = colores) +
+  scale_shape_manual(values = formas) +
+  labs(title = "PCA antes de aplicar Combat",
+       x = "PC1",
+       y = "PC2") +
+  theme_minimal()
+
+```
+
+
+En el gráfico observamos que dos estudios fueron realizados con la misma plataforma de secuenciación (GPL24676_1 y GPL24676_2). Sin embargo, las muestras no se agrupan como se esperaría, lo que sugiere la presencia de efectos de lote desconocidos.
+
+Vamos a comenzar aplicando Combat para remover el efecto de la plataforma suponiendo que esta es la unica fuente de variabilidad que afecta nuestoes datos, luego evaluaremos mediante un ANOVA si el algoritmo logro remover los efectos de lote.
+
+```{r, eval=FALSE}
+
+# Crear vector de plataforma (batch), asegurándote de que coincide con el orden de las muestras
+batch <- rep(c("GPL24676_1", "GPL18573", "GPL24676_2", "GPL11154", "GPL16791"), times = c(6, 12, 12, 7,20)) # Ajustar según el número de muestras en cada dataset
+
+# Aplicar Combat para corregir efectos de batch
+matriz_combat <- ComBat(dat = as.matrix(matriz_combinada), batch = batch, mod = NULL, par.prior = TRUE, prior.plots = FALSE)
+```
+Hacemos un PCA
+
+```{r}
+matriz_t <- t(matriz_combat)
+pca <- prcomp(matriz_t, scale. = TRUE)
+pca_df <- as.data.frame(pca$x)
+pca_df$Plataforma <- rep(c("GPL24676_1", "GPL18573", "GPL24676_2", "GPL11154", "GPL16791"), times = c(6, 12, 12, 7,20))
+pca_df$Condicion <- ifelse(grepl("R$", colnames(matriz_combat)), "Resistente", "Sensible")
+pca_df$ID_muestra <- substr(rownames(pca_df), 1, 10)
+
+# Asignar formas y colores
+formas <- c("Sensible" = 17, "Resistente" = 16) 
+colores <- c("GPL24676_1" = "red", "GPL18573" = "blue", "GPL24676_2" = "green", "GPL11154" = "purple", "GPL16791"="orange")
+
+# Graficar PCA
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Plataforma, shape = Condicion)) +
+  geom_point(size = 1.5) +
+ #ggrepel::geom_text_repel(aes(label = ID_muestra), size = 3) +  #desmarcar si queres ver el nombre de las muestras en el grafico
+  scale_color_manual(values = colores) +
+  scale_shape_manual(values = formas) +
+  labs(title = "PCA después de aplicar Combat",
+       x = "PC1",
+       y = "PC2") +
+  theme_minimal()
+```
+
+Prueba ANOVA:
+
+```{r}
+expresion_long <- matriz_combat %>%
+  as.data.frame() %>%
+  rownames_to_column("Gen") %>%
+  pivot_longer(-Gen, names_to = "ID_muestra", values_to = "Expresion") %>%
+  left_join(metadata_combinada, by = "ID_muestra")
+
+expresion_long$ID_PL <- as.factor(expresion_long$ID_PL)
+
+anova_result <- aov(Expresion ~ ID_PL, data = expresion_long)
+summary(anova_result)
+
+TukeyHSD(anova_result)
+```
+
+En los resultados del ANOVA vemos que Combat por si solo logro remover los efectos de las plataforma. 
+
+Haremos un boxplot para explorar si la distirbucion de los valores de expresion es comparable entre las muestras de las distintas plataformas: 
+
+
+```{r}
+# Convertir la matriz a formato largo
+matriz_combat_long <- melt(as.data.frame(matriz_combat), variable.name = "ID_muestra")
+
+# Unir con la metadata para agregar la información de la plataforma
+matriz_combat_long <- left_join(matriz_combat_long, metadata_combinada, by = "ID_muestra")
+
+# Convertir la plataforma en factor para que sea categórica
+matriz_combat_long$ID_PL <- as.factor(matriz_combat_long$ID_PL)
+# Reemplazar los números de ID_PL con los nombres de las plataformas
+matriz_combat_long$ID_PL <- factor(matriz_combat_long$ID_PL,
+                                levels = c(1, 2, 3, 4, 5),
+                                labels = c("GPL24676_1", "GPL18573", "GPL24676_2", "GPL11154", "GPL16791"))
+
+# Crear el boxplot con colores por plataforma
+ggplot(matriz_combat_long, aes(x = ID_muestra, y = value, fill = ID_PL)) +
+  geom_boxplot(alpha = 0.6, outlier.size = 0.8) +
+  theme_minimal() +
+  labs(title = "Distribución de la expresión por plataforma después de aplicar Combat ",
+       x = "Muestras",
+       y = "Nivel de Expresión",
+       fill = "Plataforma") +
+  theme(
+    axis.text.x = element_text(size = 6, angle = 90, hjust = 1, vjust = 0.5),
+    axis.ticks.x = element_blank(),
+    legend.position = "top",
+    plot.title = element_text(size = 10, hjust = 0.5), 
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8)
+  ) +
+  scale_fill_brewer(palette = "Set1")
+```
+
+En base al boxplot anterior vemos que los datos tienen distirbuciones similares entre las plataformas por lo que podemos utilizar esta matriz para continuar con los analisis. 
